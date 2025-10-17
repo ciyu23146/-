@@ -1,7 +1,7 @@
-beautifulsoup4==4.12.2
-google-api-python-client==2.99.0
-google-auth==2.22.0
-google-auth-httplib2==0.1.0
-google-auth-oauthlib==1.1.0
-requests==2.34.0
-tzdata==2025.10
+beautifulsoup4
+google-api-python-client
+google-auth
+google-auth-httplib2
+google-auth-oauthlib
+requests
+tzdata
