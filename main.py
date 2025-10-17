@@ -1,45 +1,53 @@
-import requests
-from bs4 import BeautifulSoup
-import re
-import csv
-from datetime import datetime
-from zoneinfo import ZoneInfo
 import os
-
+import io
+import csv
+import requests
+import re
+from bs4 import BeautifulSoup
+from datetime import datetime, timedelta, timezone
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
 # ================================
-# ① Google Drive API 設定
+# ① Google Drive サービスアカウント設定
 # ================================
-SERVICE_ACCOUNT_FILE = r"C:\path\to\your_service_account.json"  # ←秘密鍵JSONファイルの絶対パス
-SCOPES = ['https://www.googleapis.com/auth/drive.file']  # Driveファイルへのアクセス権
+SCOPES = ['https://www.googleapis.com/auth/drive']
+CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), "credentials.json")
 
-# Google Drive API認証
 creds = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-drive_service = build('drive', 'v3', credentials=creds)
-
-# アップロード先フォルダID（Google Drive上のフォルダを使いたい場合）
-# 例）URLが https://drive.google.com/drive/folders/XXXXXXXXXXXX の場合
-FOLDER_ID = 'XXXXXXXXXXXX'  # ←任意のフォルダIDに置き換える
+    CREDENTIALS_FILE, scopes=SCOPES
+)
+drive_service = build("drive", "v3", credentials=creds)
 
 # ================================
-# ② 保存先フォルダ（ローカル）
+# ② Driveのファイル設定vhttps://drive.google.com/file/d/1EJeJ5215gngU_7YxlFnj_3kFA4q--Koe/view?usp=drive_link
 # ================================
-save_dir = r"C:\Users\あなたのユーザー名\Documents\スクレイピング"
-os.makedirs(save_dir, exist_ok=True)
+FILE_ID = "1EJeJ5215gngU_7YxlFnj_3kFA4q--Koe" \
+""  # ←追記したいCSVファイルのID
+print("Google DriveファイルID:", FILE_ID)
 
 # ================================
-# ③ ファイル名生成
+# ③ 既存CSVをダウンロード
 # ================================
-user_input = input("ファイル名に入れるキーワードを入力してください: ").strip()
-now = datetime.now(ZoneInfo("Asia/Tokyo"))
-date_str = now.strftime("%y%m%d")
-time_str = now.strftime("%H%M")
-filename = f"{date_str}_{time_str}_{user_input}.csv"
-save_path = os.path.join(save_dir, filename)
+print("既存ファイルを取得中...")
+request = drive_service.files().get_media(fileId=FILE_ID)
+file_data = io.BytesIO()
+downloader = MediaIoBaseDownload(file_data, request)
+done = False
+while not done:
+    status, done = downloader.next_chunk()
+file_data.seek(0)
+
+# CSVをリストとして読み込み
+existing_rows = []
+try:
+    text_wrapper = io.TextIOWrapper(file_data, encoding="utf-8-sig")
+    reader = csv.reader(text_wrapper)
+    existing_rows = list(reader)
+except Exception as e:
+    print("⚠️ CSVの読み込みに失敗:", e)
+    existing_rows = []
 
 # ================================
 # ④ スクレイピング
@@ -52,7 +60,6 @@ soup = BeautifulSoup(res.text, "html.parser")
 entry = soup.select_one(".entry-body") or soup.select_one("#main") or soup
 text = entry.get_text("\n", strip=True)
 
-# --- 正規表現パターン ---
 pattern = re.compile(
     r"\*?(\d+)[\s　]+"
     r"([\d\*]+)[\s　]+"
@@ -77,37 +84,42 @@ for match in pattern.finditer(text):
     data.append(row)
     last_rank = rank
 
-# --- 整形して表示 ---
-print("\t".join(columns))
-for row in data[:25]:
-    print("\t".join(row))
+# ================================
+# ⑤ 追記処理
+# ================================
+JST = timezone(timedelta(hours=9))
+now = datetime.now(JST).strftime("%Y/%m/%d %H:%M")
 
-# --- CSV保存 ---
-with open(save_path, "w", newline="", encoding="utf-8-sig") as f:
-    writer = csv.writer(f)
-    writer.writerow(columns)
-    writer.writerows(data)
+# 空ファイルならヘッダーを追加
+if not existing_rows:
+    existing_rows.append(["取得日時"] + columns)
 
-print(f"\n✅ ローカルに保存完了: {save_path}")
-print(f"データ件数: {len(data)} 件")
+# データに取得日時を追加
+for row in data:
+    existing_rows.append([now] + row)
 
 # ================================
-# ⑤ Google Drive へアップロード
+# ⑥ CSVを再アップロード（上書き・ファイル名保持）
 # ================================
-print("Google Driveにアップロード中...")
+# 元のファイル名を取得
+file_metadata = drive_service.files().get(fileId=FILE_ID, fields="name").execute()
+original_name = file_metadata["name"]
 
-file_metadata = {'name': filename}
-if FOLDER_ID:
-    file_metadata['parents'] = [FOLDER_ID]
+# CSVを書き出し
+output = io.BytesIO()
+text_wrapper = io.TextIOWrapper(output, encoding="utf-8-sig", newline="")
+writer = csv.writer(text_wrapper)
+writer.writerows(existing_rows)
+text_wrapper.flush()  # ←これでBytesIOに反映
+output.seek(0)
 
-media = MediaFileUpload(save_path, mimetype='text/csv')
-uploaded_file = drive_service.files().create(
-    body=file_metadata,
+# Drive上書き（ファイル名保持）
+media = MediaIoBaseUpload(output, mimetype="text/csv", resumable=True)
+updated_file = drive_service.files().update(
+    fileId=FILE_ID,
     media_body=media,
-    fields='id'
+    body={"name": original_name}
 ).execute()
 
-file_id = uploaded_file.get('id')
-drive_url = f"https://drive.google.com/file/d/{file_id}/view"
-
-print(f"✅ Google Driveにアップロード完了: {drive_url}")
+print(f"\n✅ Drive上のファイルに追記完了: https://drive.google.com/file/d/{FILE_ID}/view")
+print(f"追記データ件数: {len(data)} 件")
